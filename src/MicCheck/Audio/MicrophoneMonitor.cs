@@ -44,11 +44,15 @@ public sealed class MicrophoneMonitor : IDisposable
         get { lock (_gate) return _recording == null ? 0 : (double)_recording.Count / _recordingTarget; }
     }
 
-    public void Start(MMDevice device)
+    /// <summary>Whether Windows voice processing was successfully requested for the current stream.</summary>
+    public bool VoiceProcessingEnabled { get; private set; }
+
+    public void Start(MMDevice device, bool voiceProcessing)
     {
         Stop();
 
         var capture = new WasapiCapture(device, useEventSync: true, audioBufferMillisecondsLength: 20);
+        VoiceProcessingEnabled = voiceProcessing && CommunicationsStream.TryEnable(capture);
         var format = capture.WaveFormat is WaveFormatExtensible ext ? ext.ToStandardWaveFormat() : capture.WaveFormat;
         if (!IsSupported(format))
         {

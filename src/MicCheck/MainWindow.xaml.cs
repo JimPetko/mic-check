@@ -102,7 +102,11 @@ public partial class MainWindow : Window
     private void OnRefreshClick(object sender, RoutedEventArgs e) =>
         LoadDevices((DeviceCombo.SelectedItem as DeviceItem)?.Device.ID);
 
-    private void OnDeviceChanged(object sender, SelectionChangedEventArgs e)
+    private void OnDeviceChanged(object sender, SelectionChangedEventArgs e) => StartSelectedDevice();
+
+    private void OnNoiseSuppressionClick(object sender, RoutedEventArgs e) => StartSelectedDevice();
+
+    private void StartSelectedDevice()
     {
         StopMonitoring();
         if (DeviceCombo.SelectedItem is not DeviceItem item)
@@ -110,10 +114,17 @@ public partial class MainWindow : Window
 
         try
         {
-            _monitor.Start(item.Device);
+            var wantProcessing = NoiseSuppressionCheck.IsChecked == true;
+            _monitor.Start(item.Device, wantProcessing);
             var f = _monitor.Format!;
             var kind = f.Encoding == NAudio.Wave.WaveFormatEncoding.IeeeFloat ? "float" : "PCM";
-            FormatText.Text = $"Monitoring  ·  {f.SampleRate:N0} Hz  ·  {f.Channels} ch  ·  {f.BitsPerSample}-bit {kind}";
+            var processing = (wantProcessing, _monitor.VoiceProcessingEnabled) switch
+            {
+                (false, _) => "raw signal",
+                (true, true) => "noise filtering on",
+                (true, false) => "noise filtering unavailable for this device",
+            };
+            FormatText.Text = $"Monitoring  ·  {f.SampleRate:N0} Hz  ·  {f.Channels} ch  ·  {f.BitsPerSample}-bit {kind}  ·  {processing}";
             RecordButton.IsEnabled = true;
             EffectsPanel.SetInput(f.SampleRate);
         }

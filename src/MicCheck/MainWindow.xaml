@@ -25,6 +25,7 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
                         <TextBlock Text="Microphone" Style="{StaticResource Caption}" Margin="0,0,12,0" />
@@ -46,8 +47,13 @@
                         <CheckBox x:Name="MuteCheck" Grid.Row="1" Grid.Column="2" Content="Muted" Margin="12,12,0,0"
                                   Click="OnMuteClick" />
 
-                        <TextBlock x:Name="FormatText" Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0"
-                                   Style="{StaticResource Caption}" Text="No device" />
+                        <CheckBox x:Name="NoiseSuppressionCheck" Grid.Row="2" Grid.ColumnSpan="3" Margin="0,12,0,0"
+                                  IsChecked="True" Click="OnNoiseSuppressionClick"
+                                  Content="Filter background noise (Windows voice processing)"
+                                  ToolTip="Asks Windows to treat this as a voice call so it applies Voice Clarity / driver noise suppression. Removes keyboard and mouse clicks and other background noise. Turn off to hear the raw mic." />
+
+                        <TextBlock x:Name="FormatText" Grid.Row="3" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                                   Style="{StaticResource Caption}" Text="No device" TextWrapping="Wrap" />
                     </Grid>
                 </Border>
 
