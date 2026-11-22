@@ -37,6 +37,23 @@ public sealed record EffectPreset(string Name, Dictionary<string, EffectPresetEn
             ("reverb", [("roomSize", 0.6), ("damping", 0.2), ("mix", 0.25)])),
     ];
 
+    /// <summary>
+    /// Drops what a hand-edited file could contain that would crash Apply: JSON nulls deserialize fine.
+    /// Returns null if the preset itself is unusable.
+    /// </summary>
+    public static EffectPreset? Sanitize(EffectPreset? preset)
+    {
+        if (string.IsNullOrWhiteSpace(preset?.Name) || preset.Effects == null)
+            return null;
+
+        return preset with
+        {
+            Effects = preset.Effects
+                .Where(e => e.Value?.Values != null)
+                .ToDictionary(e => e.Key, e => e.Value),
+        };
+    }
+
     private static EffectPreset Create(string name, params (string Effect, (string Key, double Value)[] Values)[] effects) =>
         new(name, effects.ToDictionary(
             e => e.Effect,
@@ -58,17 +75,7 @@ public static class PresetStore
             if (!File.Exists(FilePath))
                 return [];
             var presets = JsonSerializer.Deserialize<List<EffectPreset?>>(File.ReadAllText(FilePath), JsonOptions) ?? [];
-
-            // The file may have been hand-edited: JSON nulls deserialize fine but would crash Apply later.
-            return presets
-                .Where(p => !string.IsNullOrWhiteSpace(p?.Name) && p.Effects != null)
-                .Select(p => p! with
-                {
-                    Effects = p.Effects
-                        .Where(e => e.Value?.Values != null)
-                        .ToDictionary(e => e.Key, e => e.Value),
-                })
-                .ToList();
+            return presets.Select(EffectPreset.Sanitize).OfType<EffectPreset>().ToList();
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         {

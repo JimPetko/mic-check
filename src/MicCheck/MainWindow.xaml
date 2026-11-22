@@ -57,6 +57,25 @@
                     </Grid>
                 </Border>
 
+                <!-- Virtual microphone -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Text="Use in other apps" Style="{StaticResource SectionTitle}" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <CheckBox x:Name="VirtualMicCheck" Content="Send my processed voice to" Margin="0,0,12,0"
+                                      Click="OnVirtualMicClick" />
+                            <ComboBox x:Name="VirtualMicCombo" Grid.Column="1" SelectionChanged="OnVirtualMicDeviceChanged" />
+                        </Grid>
+                        <TextBlock x:Name="VirtualMicStatus" Margin="0,8,0,0" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+                        <CheckBox x:Name="StartupCheck" Margin="0,10,0,0" Click="OnStartupClick"
+                                  Content="Start with Windows (in the system tray)" />
+                    </StackPanel>
+                </Border>
+
                 <!-- Live level -->
                 <Border Style="{StaticResource Card}">
                     <StackPanel>

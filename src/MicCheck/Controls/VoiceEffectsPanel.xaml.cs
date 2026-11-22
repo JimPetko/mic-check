@@ -11,7 +11,7 @@ namespace MicCheck.Controls;
 public partial class VoiceEffectsPanel : UserControl
 {
     private readonly List<EffectPreset> _userPresets = PresetStore.Load();
-    private readonly LiveEffectMonitor _live;
+    private VoicePipeline _pipeline = null!;
     private int _sampleRate;
     private bool _refreshingPresets;
     private bool _applyingPreset;
@@ -19,9 +19,20 @@ public partial class VoiceEffectsPanel : UserControl
     public VoiceEffectsPanel()
     {
         InitializeComponent();
-        _live = new LiveEffectMonitor(Chain);
+    }
+
+    /// <summary>Must be called once before use. <paramref name="presetName"/> reselects the preset the settings came from.</summary>
+    public void Initialize(VoicePipeline pipeline, string? presetName)
+    {
+        _pipeline = pipeline;
+        _pipeline.Monitor.Faulted += (_, ex) =>
+        {
+            LiveToggle.IsChecked = false;
+            StatusText.Text = $"Live listening stopped{(ex != null ? $": {ex.Message}" : "")}.";
+        };
+
         EffectsList.ItemsSource = Chain.Effects;
-        RefreshPresets(EffectPreset.BuiltIn[0].Name);
+        RefreshPresets(presetName);
 
         foreach (var effect in Chain.Effects)
         {
@@ -31,7 +42,11 @@ public partial class VoiceEffectsPanel : UserControl
         }
     }
 
-    public VoiceEffectChain Chain { get; } = new();
+    private VoiceEffectChain Chain => _pipeline.Chain;
+    private AudioSink Live => _pipeline.Monitor;
+
+    /// <summary>The preset the current settings came from, or null once they've been edited.</summary>
+    public string? SelectedPresetName => (PresetCombo.SelectedItem as PresetItem)?.Preset.Name;
 
     public event EventHandler? PlayRecordingClicked;
 
@@ -43,16 +58,11 @@ public partial class VoiceEffectsPanel : UserControl
     public void SetInput(int sampleRate)
     {
         _sampleRate = sampleRate;
-        _live.Stop();
+        Live.Stop();
         if (sampleRate > 0 && LiveToggle.IsChecked == true && !StartLive())
             return;
         UpdateLiveStatus();
     }
-
-    /// <summary>Called on the capture thread.</summary>
-    public void Feed(float[] samples) => _live.Feed(samples);
-
-    public void Shutdown() => _live.Dispose();
 
     // ---- Live monitoring ----
 
@@ -65,7 +75,7 @@ public partial class VoiceEffectsPanel : UserControl
         }
         else
         {
-            _live.Stop();
+            Live.Stop();
         }
         UpdateLiveStatus();
     }
@@ -75,7 +85,7 @@ public partial class VoiceEffectsPanel : UserControl
     {
         try
         {
-            _live.Start(_sampleRate);
+            Live.Start(_sampleRate, deviceId: null);
             return true;
         }
         catch (Exception ex)
@@ -90,8 +100,8 @@ public partial class VoiceEffectsPanel : UserControl
     {
         if (LiveToggle.IsChecked != true)
             StatusText.Text = "";
-        else if (_live.IsRunning)
-            StatusText.Text = "Listening live. Changes apply instantly. Expect a slight delay.";
+        else if (Live.IsRunning)
+            StatusText.Text = $"Listening live on {Live.DeviceName}. Changes apply instantly. Expect a slight delay.";
         else
             StatusText.Text = "Live listening will start once a microphone is available.";
     }

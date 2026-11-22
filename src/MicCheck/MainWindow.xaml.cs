@@ -1,10 +1,12 @@
 ﻿using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using MicCheck.Audio;
 using MicCheck.Controls;
+using MicCheck.Effects;
 using NAudio.CoreAudioApi;
 
 namespace MicCheck;
@@ -17,15 +19,27 @@ public partial class MainWindow : Window
     private const double FallDbPerSecond = 24;
     private const float ClipThreshold = 0.99f;
 
+    private static readonly TimeSpan ReconnectInterval = TimeSpan.FromSeconds(5);
+
+    private readonly AppSettings _settings = AppSettings.Load();
     private readonly MMDeviceEnumerator _enumerator = new();
     private readonly MicrophoneMonitor _monitor = new();
+    private readonly VoicePipeline _pipeline = new();
     private readonly ClipPlayer _player = new();
+    private readonly TrayIcon _tray = new();
     private readonly DispatcherTimer _timer;
+    private readonly DispatcherTimer _reconnectTimer;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
 
     private List<DeviceItem> _devices = [];
+    private List<OutputItem> _outputs = [];
+    private bool _loadingDevices;
     private MMDevice? _volumeDevice;
     private bool _syncingVolume;
+    private bool _exiting;
+    private string? _lastReconnectIds;
+
+    public bool IsClosed { get; private set; }
 
     private TimeSpan _lastTick;
     private double _rmsDb = LevelMeter.MinDb;
@@ -42,26 +56,233 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        NoiseSuppressionCheck.IsChecked = _settings.NoiseFilter;
+        VirtualMicCheck.IsChecked = _settings.VirtualMicEnabled;
+        StartupCheck.IsChecked = StartupRegistration.IsEnabled;
+        if (_settings.Effects != null)
+            _pipeline.Chain.Apply(_settings.Effects);
+        EffectsPanel.Initialize(_pipeline, _settings.Effects != null ? _settings.PresetName : EffectPreset.BuiltIn[0].Name);
+
         _monitor.Faulted += OnMonitorFaulted;
         _monitor.RecordingCompleted += OnRecordingCompleted;
-        _monitor.SamplesCaptured += (_, samples) => EffectsPanel.Feed(samples);
+        _monitor.SamplesCaptured += (_, samples) => _pipeline.Process(samples, _monitor.SampleRate);
+        _pipeline.VirtualMic.Faulted += (_, ex) => UpdateVirtualMicStatus(ex);
         _player.Finished += (_, _) => SetPlaying(null);
         EffectsPanel.PlayRecordingClicked += OnPlayWithEffectsClick;
 
+        _tray.OpenRequested += (_, _) => ShowFromTray();
+        _tray.ExitRequested += (_, _) => ExitApp();
+        _tray.VirtualMicToggled += (_, enabled) =>
+        {
+            VirtualMicCheck.IsChecked = enabled;
+            ApplyVirtualMic();
+            SaveSettings();
+        };
+
         _timer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) };
         _timer.Tick += OnTick;
+        _reconnectTimer = new DispatcherTimer { Interval = ReconnectInterval };
+        _reconnectTimer.Tick += OnReconnectTick;
 
-        Loaded += (_, _) =>
+        Closing += OnClosing;
+        Closed += (_, _) =>
         {
-            LoadDevices(preferredId: null);
-            _timer.Start();
+            IsClosed = true;
+            Shutdown();
         };
-        Closed += (_, _) => Shutdown();
+        Deactivated += (_, _) => SaveSettings();
+        Application.Current.SessionEnding += (_, _) => SaveSettings();
+
+        LoadOutputs(_settings.VirtualMicDeviceId);
+        LoadDevices(_settings.MicrophoneId);
+        _timer.Start();
+        _reconnectTimer.Start();
     }
 
     private sealed record DeviceItem(MMDevice Device, string Name)
     {
         public override string ToString() => Name;
+    }
+
+    private sealed record OutputItem(string Id, string Name)
+    {
+        public override string ToString() => Name;
+    }
+
+    // ---- Tray ----
+
+    public void ShowFromTray()
+    {
+        Show();
+        if (WindowState == WindowState.Minimized)
+            WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    // While the virtual mic is on, closing the window keeps it running in the tray.
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        SaveSettings();
+        if (_exiting || VirtualMicCheck.IsChecked != true)
+            return;
+
+        e.Cancel = true;
+        Hide();
+        _tray.ShowStillRunningHint();
+    }
+
+    private void ExitApp()
+    {
+        _exiting = true;
+        Close();
+    }
+
+    private void SaveSettings()
+    {
+        _settings.NoiseFilter = NoiseSuppressionCheck.IsChecked == true;
+        _settings.VirtualMicEnabled = VirtualMicCheck.IsChecked == true;
+        _settings.PresetName = EffectsPanel.SelectedPresetName;
+        _settings.Effects = _pipeline.Chain.ToPreset("Current");
+        _settings.Save();
+    }
+
+    // Brings the mic and virtual mic back after a device is unplugged/replugged, e.g. while hidden in the tray.
+    private void OnReconnectTick(object? sender, EventArgs e)
+    {
+        if (!_monitor.IsRunning)
+        {
+            // Reloading resets the UI (and stops clip playback), so while the window is visible only retry
+            // when the set of microphones has actually changed. A mic that's present but won't open
+            // (privacy settings, exclusive use) would otherwise be retried in a loop under the user.
+            var activeIds = ActiveCaptureIds();
+            if (IsVisible && activeIds == _lastReconnectIds)
+                return;
+            _lastReconnectIds = activeIds;
+
+            var wanted = _settings.MicrophoneId;
+            if (wanted == null || activeIds.Contains(wanted, StringComparison.Ordinal))
+                LoadDevices(wanted);
+        }
+        else if (VirtualMicCheck.IsChecked == true && !_pipeline.VirtualMic.IsRunning
+                 && VirtualMicCombo.SelectedItem is OutputItem)
+        {
+            ApplyVirtualMic();
+        }
+    }
+
+    private string ActiveCaptureIds()
+    {
+        var ids = _enumerator.EnumerateAudioEndPoints(DataFlow.Capture, DeviceState.Active)
+            .Select(d =>
+            {
+                using (d)
+                    return d.ID;
+            })
+            .Order(StringComparer.Ordinal);
+        return string.Join("|", ids);
+    }
+
+    // ---- Virtual microphone ----
+
+    private const string CableInputName = "CABLE Input";
+
+    private static bool IsVirtualCable(string name) => name.Contains(CableInputName, StringComparison.OrdinalIgnoreCase);
+
+    private void LoadOutputs(string? preferredId)
+    {
+        _outputs = _enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+            .Select(d =>
+            {
+                using (d)
+                    return new OutputItem(d.ID, d.FriendlyName);
+            })
+            .OrderByDescending(o => IsVirtualCable(o.Name))
+            .ThenBy(o => o.Name)
+            .ToList();
+
+        _loadingDevices = true;
+        VirtualMicCombo.ItemsSource = _outputs;
+        // Never default to real speakers: only a saved choice or a virtual cable.
+        VirtualMicCombo.SelectedItem = _outputs.FirstOrDefault(o => o.Id == preferredId)
+            ?? _outputs.FirstOrDefault(o => IsVirtualCable(o.Name));
+        _loadingDevices = false;
+    }
+
+    private void OnVirtualMicClick(object sender, RoutedEventArgs e)
+    {
+        ApplyVirtualMic();
+        SaveSettings();
+    }
+
+    private void OnVirtualMicDeviceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingDevices)
+            return;
+        // Like the mic, only a choice the user makes is remembered, not an automatic fallback.
+        _settings.VirtualMicDeviceId = (VirtualMicCombo.SelectedItem as OutputItem)?.Id;
+        ApplyVirtualMic();
+        SaveSettings();
+    }
+
+    private void ApplyVirtualMic()
+    {
+        _pipeline.VirtualMic.Stop();
+        var output = VirtualMicCombo.SelectedItem as OutputItem;
+        var sampleRate = _monitor.IsRunning ? _monitor.SampleRate : 0;
+
+        if (VirtualMicCheck.IsChecked == true && output != null && sampleRate > 0)
+        {
+            try
+            {
+                _pipeline.VirtualMic.Start(sampleRate, output.Id);
+            }
+            catch (Exception ex)
+            {
+                UpdateVirtualMicStatus(ex);
+                return;
+            }
+        }
+        UpdateVirtualMicStatus(null);
+    }
+
+    private void UpdateVirtualMicStatus(Exception? error)
+    {
+        var output = VirtualMicCombo.SelectedItem as OutputItem;
+        var running = _pipeline.VirtualMic.IsRunning;
+        var cableInstalled = _outputs.Any(o => IsVirtualCable(o.Name));
+
+        VirtualMicStatus.Text = (VirtualMicCheck.IsChecked == true, running) switch
+        {
+            (_, true) => $"On. In Discord, Zoom, Teams, OBS and so on, choose \"{RecordingSideName(output!.Name)}\" as the microphone.",
+            (true, false) when error != null => $"Couldn't send to {output?.Name ?? "the device"}: {error.Message}. Retrying every few seconds.",
+            (true, false) when output == null => cableInstalled
+                ? "Choose the virtual cable to send your voice to."
+                : "VB-CABLE isn't installed. Get it free from vb-audio.com/Cable, restart Windows, then press Refresh.",
+            (true, false) => "Waiting for the microphone…",
+            (false, _) when !cableInstalled =>
+                "Off. To use your processed voice in other apps, install VB-CABLE (free, vb-audio.com/Cable), restart Windows, then press Refresh.",
+            (false, _) => "Off. Other apps hear your microphone without Mic Check's effects.",
+        };
+
+        _tray.SetVirtualMicState(VirtualMicCheck.IsChecked == true,
+            running ? $"Mic Check: virtual mic on ({EffectsPanel.SelectedPresetName ?? "custom effects"})" : "Mic Check");
+    }
+
+    // VB-CABLE's playback side is "CABLE Input"; apps record from its paired "CABLE Output".
+    private static string RecordingSideName(string outputName) =>
+        IsVirtualCable(outputName) ? "CABLE Output (VB-Audio Virtual Cable)" : $"the recording side of {outputName}";
+
+    private void OnStartupClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            StartupRegistration.SetEnabled(StartupCheck.IsChecked == true);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            StartupCheck.IsChecked = StartupRegistration.IsEnabled;
+            VirtualMicStatus.Text = $"Couldn't change the startup setting: {ex.Message}";
+        }
     }
 
     // ---- Devices ----
@@ -96,15 +317,33 @@ public partial class MainWindow : Window
             return;
         }
 
+        _loadingDevices = true;
         DeviceCombo.SelectedItem = _devices.FirstOrDefault(d => d.Device.ID == preferredId) ?? _devices[0];
+        _loadingDevices = false;
     }
 
-    private void OnRefreshClick(object sender, RoutedEventArgs e) =>
+    private void OnRefreshClick(object sender, RoutedEventArgs e)
+    {
+        LoadOutputs((VirtualMicCombo.SelectedItem as OutputItem)?.Id ?? _settings.VirtualMicDeviceId);
         LoadDevices((DeviceCombo.SelectedItem as DeviceItem)?.Device.ID);
+    }
 
-    private void OnDeviceChanged(object sender, SelectionChangedEventArgs e) => StartSelectedDevice();
+    private void OnDeviceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Only a choice the user makes is remembered; automatic fallbacks (saved mic missing) are not.
+        if (!_loadingDevices && DeviceCombo.SelectedItem is DeviceItem item)
+        {
+            _settings.MicrophoneId = item.Device.ID;
+            SaveSettings();
+        }
+        StartSelectedDevice();
+    }
 
-    private void OnNoiseSuppressionClick(object sender, RoutedEventArgs e) => StartSelectedDevice();
+    private void OnNoiseSuppressionClick(object sender, RoutedEventArgs e)
+    {
+        SaveSettings();
+        StartSelectedDevice();
+    }
 
     private void StartSelectedDevice()
     {
@@ -127,6 +366,7 @@ public partial class MainWindow : Window
             FormatText.Text = $"Monitoring  ·  {f.SampleRate:N0} Hz  ·  {f.Channels} ch  ·  {f.BitsPerSample}-bit {kind}  ·  {processing}";
             RecordButton.IsEnabled = true;
             EffectsPanel.SetInput(f.SampleRate);
+            ApplyVirtualMic();
         }
         catch (Exception ex)
         {
@@ -142,6 +382,7 @@ public partial class MainWindow : Window
         _monitor.Stop();
         _player.Stop();
         EffectsPanel.SetInput(0);
+        ApplyVirtualMic();
         DetachVolume();
         ResetLevels();
         SetPlaying(null);
@@ -153,8 +394,9 @@ public partial class MainWindow : Window
         ResetLevels();
         ResetRecordingUi();
         EffectsPanel.SetInput(0);
+        ApplyVirtualMic();
         RecordButton.IsEnabled = false;
-        FormatText.Text = $"Microphone stopped{(ex != null ? $": {ex.Message}" : "")}. Press Refresh to reconnect.";
+        FormatText.Text = $"Microphone stopped{(ex != null ? $": {ex.Message}" : "")}. Reconnecting automatically when it's back.";
     }
 
     // ---- Windows input volume ----
@@ -222,7 +464,8 @@ public partial class MainWindow : Window
         var dt = (now - _lastTick).TotalSeconds;
         _lastTick = now;
 
-        if (!_monitor.IsRunning)
+        // Nothing to draw while hidden in the tray.
+        if (!_monitor.IsRunning || !IsVisible)
             return;
 
         var (peak, rms) = _monitor.ReadLevels();
@@ -348,7 +591,7 @@ public partial class MainWindow : Window
 
         try
         {
-            var samples = withEffects ? EffectsPanel.Chain.Render(_clip, _clipSampleRate) : _clip;
+            var samples = withEffects ? _pipeline.Chain.Render(_clip, _clipSampleRate) : _clip;
             _player.Play(samples, _clipSampleRate);
             SetPlaying(withEffects);
         }
@@ -369,12 +612,15 @@ public partial class MainWindow : Window
     private void Shutdown()
     {
         _timer.Stop();
+        _reconnectTimer.Stop();
         DetachVolume();
-        EffectsPanel.Shutdown();
         _monitor.Dispose();
+        _pipeline.Dispose();
         _player.Dispose();
+        _tray.Dispose();
         foreach (var item in _devices)
             item.Device.Dispose();
         _enumerator.Dispose();
+        Application.Current.Shutdown();
     }
 }
