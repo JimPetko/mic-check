@@ -1,0 +1,83 @@
+<UserControl x:Class="MicCheck.Controls.VoiceEffectsPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:effects="clr-namespace:MicCheck.Effects">
+    <StackPanel>
+        <Border Style="{StaticResource Card}">
+            <StackPanel>
+                <TextBlock Text="Voice effects" Style="{StaticResource SectionTitle}" />
+                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                           Text="Pick a preset or switch on effects below and adjust them. Use headphones when listening live, or your speakers will feed back into the mic." />
+
+                <Grid Margin="0,14,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="64" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Preset" Style="{StaticResource Caption}" />
+                    <ComboBox x:Name="PresetCombo" Grid.Column="1" SelectionChanged="OnPresetChanged" />
+                    <Button x:Name="DeletePresetButton" Grid.Column="2" Content="Delete" Width="110" Margin="8,0,0,0"
+                            IsEnabled="False" Click="OnDeletePresetClick" ToolTip="Delete this saved preset" />
+                </Grid>
+                <Grid Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="64" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Save as" Style="{StaticResource Caption}" />
+                    <TextBox x:Name="PresetNameBox" Grid.Column="1" KeyDown="OnPresetNameKeyDown" />
+                    <Button Grid.Column="2" Content="Save preset" Width="110" Margin="8,0,0,0" Click="OnSavePresetClick" />
+                </Grid>
+
+                <WrapPanel Margin="0,14,0,0">
+                    <ToggleButton x:Name="LiveToggle" Content="Hear myself live" Padding="14,6"
+                                  Checked="OnLiveToggled" Unchecked="OnLiveToggled" />
+                    <Button x:Name="PlayRecordingButton" Content="Play recording with effects" Margin="8,0,0,0"
+                            IsEnabled="False" Click="OnPlayRecordingClick"
+                            ToolTip="Make a recording in the Record &amp; play back section first" />
+                </WrapPanel>
+                <TextBlock x:Name="StatusText" Margin="0,8,0,0" Style="{StaticResource Caption}" TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+
+        <ItemsControl x:Name="EffectsList">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="{x:Type effects:VoiceEffect}">
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <CheckBox IsChecked="{Binding Enabled}">
+                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" />
+                            </CheckBox>
+                            <TextBlock Text="{Binding Description}" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                       Margin="0,4,0,0" />
+                            <ItemsControl ItemsSource="{Binding Parameters}" IsEnabled="{Binding Enabled}" Margin="0,6,0,0">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate DataType="{x:Type effects:EffectParameter}">
+                                        <Grid Margin="0,2,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="90" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="120" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Label}" Style="{StaticResource Caption}" />
+                                            <Slider Grid.Column="1" VerticalAlignment="Center"
+                                                    Minimum="{Binding Minimum, Mode=OneTime}"
+                                                    Maximum="{Binding Maximum, Mode=OneTime}"
+                                                    TickFrequency="{Binding Step, Mode=OneTime}"
+                                                    IsSnapToTickEnabled="True"
+                                                    Value="{Binding Value}" />
+                                            <TextBlock Grid.Column="2" Text="{Binding DisplayValue}" TextAlignment="Right"
+                                                       VerticalAlignment="Center" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+    </StackPanel>
+</UserControl>
